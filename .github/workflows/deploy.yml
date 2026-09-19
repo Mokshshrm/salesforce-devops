@@ -42,8 +42,20 @@ jobs:
 
       - name: Authenticate Target Org
         run: |
-          if [ -z "$SF_JWT_KEY" ] || [ -z "$SF_CLIENT_ID" ] || [ -z "$SF_USERNAME" ] || [ -z "$SF_INSTANCE_URL" ]; then
-            echo "::error::Missing required Salesforce secrets (SERVER_KEY, CLIENT_ID, USERNAME, INSTANCE_URL) in environment 'ms${{ github.ref_name }}'."
+          if [ -z "$SF_JWT_KEY" ]; then
+            echo "::error::Missing JWT Key in secrets. Checked secrets.SF_JWT_KEY, secrets.SERVER_KEY, secrets.CLIENT_SECRET for environment 'ms${{ github.ref_name }}'."
+            exit 1
+          fi
+          if [ -z "$SF_CLIENT_ID" ]; then
+            echo "::error::Missing CLIENT_ID in environment 'ms${{ github.ref_name }}'."
+            exit 1
+          fi
+          if [ -z "$SF_USERNAME" ]; then
+            echo "::error::Missing USERNAME in variables/secrets for environment 'ms${{ github.ref_name }}'."
+            exit 1
+          fi
+          if [ -z "$SF_INSTANCE_URL" ]; then
+            echo "::error::Missing INSTANCE_URL in variables/secrets for environment 'ms${{ github.ref_name }}'."
             exit 1
           fi
 
@@ -58,10 +70,10 @@ jobs:
             --username "$SF_USERNAME" --instance-url "$SF_INSTANCE_URL" \
             --alias TARGET_ORG --set-default
         env:
-          SF_JWT_KEY: ${{ secrets.SERVER_KEY }}
-          SF_CLIENT_ID: ${{ secrets.CLIENT_ID }}
-          SF_USERNAME: ${{ secrets.USERNAME }}
-          SF_INSTANCE_URL: ${{ secrets.INSTANCE_URL }}
+          SF_JWT_KEY: ${{ secrets.SF_JWT_KEY || secrets.SERVER_KEY || secrets.CLIENT_SECRET }}
+          SF_CLIENT_ID: ${{ secrets.CLIENT_ID || vars.CLIENT_ID }}
+          SF_USERNAME: ${{ vars.USERNAME || secrets.USERNAME }}
+          SF_INSTANCE_URL: ${{ vars.INSTANCE_URL || secrets.INSTANCE_URL }}
 
       - name: Calculate Delta Changes
         id: delta
