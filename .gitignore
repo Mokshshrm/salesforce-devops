@@ -48,5 +48,4 @@ $RECYCLE.BIN/
 **/venv/
 
 .mvn
-.husky
 .vscode
