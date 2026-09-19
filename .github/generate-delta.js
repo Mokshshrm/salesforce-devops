@@ -124,8 +124,22 @@ async function run() {
     return;
   }
 
-  if (process.env.SF_API_VERSION) {
-    componentSet.apiVersion = process.env.SF_API_VERSION.replace(/^v/i, '');
+  let apiVersion = (process.env.SF_API_VERSION || '').trim().replace(/^v/i, '');
+  if (!apiVersion && fs.existsSync('sfdx-project.json')) {
+    try {
+      const sfdxProject = JSON.parse(fs.readFileSync('sfdx-project.json', 'utf8'));
+      if (sfdxProject.sourceApiVersion) {
+        apiVersion = String(sfdxProject.sourceApiVersion).trim().replace(/^v/i, '');
+      }
+    } catch (e) {
+      console.error('[delta] Could not read sfdx-project.json:', e.message);
+    }
+  }
+
+  if (apiVersion) {
+    componentSet.apiVersion = apiVersion;
+    console.log(`[delta] Salesforce API Version: ${apiVersion}`);
+    emit('SF_API_VERSION', apiVersion);
   }
 
   const manifestDir = path.join(process.cwd(), 'manifest');

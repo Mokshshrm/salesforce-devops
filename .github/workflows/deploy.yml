@@ -1,0 +1,87 @@
+# Author: Moksh Sharma / DevOps Architecture
+# Description: Deploys delta metadata on push / merge to QA, UAT, or Main.
+
+name: Deploy Environment
+
+on:
+  push:
+    branches: [qa, uat, main]
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: ${{ vars.NODE_VERSION || '22' }}
+  SF_CLI_VERSION: ${{ vars.SF_CLI_VERSION || 'latest' }}
+  SDR_VERSION: ${{ vars.SDR_VERSION || 'latest' }}
+
+jobs:
+  deploy:
+    name: Deploy to ${{ github.ref_name }}
+    runs-on: ubuntu-latest
+    environment: ms${{ github.ref_name }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install Salesforce CLI & SDR
+        run: |
+          CLI_PKG="${SF_CLI_VERSION:+@salesforce/cli@$SF_CLI_VERSION}"
+          CLI_PKG="${CLI_PKG:-@salesforce/cli@latest}"
+          SDR_PKG="${SDR_VERSION:+@salesforce/source-deploy-retrieve@$SDR_VERSION}"
+          SDR_PKG="${SDR_PKG:-@salesforce/source-deploy-retrieve@latest}"
+          npm install -g "$CLI_PKG"
+          npm install --no-save "$SDR_PKG"
+
+      - name: Authenticate Target Org
+        run: |
+          if [ -z "$SF_JWT_KEY" ] || [ -z "$SF_CLIENT_ID" ] || [ -z "$SF_USERNAME" ] || [ -z "$SF_INSTANCE_URL" ]; then
+            echo "::error::Missing required Salesforce secrets (SERVER_KEY, CLIENT_ID, USERNAME, INSTANCE_URL) in environment 'ms${{ github.ref_name }}'."
+            exit 1
+          fi
+
+          if echo "$SF_JWT_KEY" | grep -q "BEGIN"; then
+            printf '%s\n' "$SF_JWT_KEY" > /tmp/server.key
+          else
+            printf '%s' "$SF_JWT_KEY" | tr -d '\r\n ' | base64 -d > /tmp/server.key
+          fi
+          chmod 600 /tmp/server.key
+
+          sf org login jwt --client-id "$SF_CLIENT_ID" --jwt-key-file /tmp/server.key \
+            --username "$SF_USERNAME" --instance-url "$SF_INSTANCE_URL" \
+            --alias TARGET_ORG --set-default
+        env:
+          SF_JWT_KEY: ${{ secrets.SERVER_KEY }}
+          SF_CLIENT_ID: ${{ secrets.CLIENT_ID }}
+          SF_USERNAME: ${{ secrets.USERNAME }}
+          SF_INSTANCE_URL: ${{ secrets.INSTANCE_URL }}
+
+      - name: Calculate Delta Changes
+        id: delta
+        run: node .github/generate-delta.js
+        env:
+          PACKAGE_DIR: force-app
+          BUILD_REASON: Push
+          BEFORE_SHA: ${{ github.event.before }}
+          SF_API_VERSION: ${{ vars.SF_API_VERSION }}
+
+      - name: Deploy Changes
+        if: steps.delta.outputs.SF_HAS_CHANGES == 'true'
+        run: |
+          TEST_ARGS="${{ steps.delta.outputs.SF_TEST_ARGS }}"
+          if [ "${{ steps.delta.outputs.SF_USE_MANIFEST }}" = "true" ]; then
+            sf project deploy start --manifest manifest/package.xml --target-org TARGET_ORG $TEST_ARGS --wait 120
+          else
+            sf project deploy start --source-dir force-app --target-org TARGET_ORG $TEST_ARGS --wait 120
+          fi
+
+      - name: No Changes Detected
+        if: steps.delta.outputs.SF_HAS_CHANGES == 'false'
+        run: echo "No metadata changes detected to deploy."
