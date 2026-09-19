@@ -1,0 +1,199 @@
+# # Author: Moksh Sharma / DevOps Architecture
+# # Description: Azure Pipelines CI/CD for Salesforce Delta Deployment via @salesforce/source-deploy-retrieve
+
+# trigger:
+#   branches:
+#     include: [qa, uat, main, hotfix/*]
+
+# pr:
+#   branches:
+#     include: [qa, uat, main]
+
+# pool:
+#   vmImage: ubuntu-latest
+
+# variables:
+#   - name: PACKAGE_DIR
+#     value: force-app
+#   - name: TARGET_BRANCH
+#     value: $[ coalesce(variables['System.PullRequest.TargetBranch'], variables['Build.SourceBranch']) ]
+#   - name: SOURCE_BRANCH
+#     value: $[ coalesce(variables['System.PullRequest.SourceBranch'], variables['Build.SourceBranch']) ]
+#   - name: ENV_NAME
+#     value: $[ replace(variables['TARGET_BRANCH'], 'refs/heads/', '') ]
+#   - name: ENV_DISPLAY
+#     value: $[ iif(eq(variables['ENV_NAME'], 'main'), 'production', variables['ENV_NAME']) ]
+
+# stages:
+#   - stage: Pipeline
+#     jobs:
+#       - job: Validate
+#         displayName: 'Resolve delta + validate'
+#         steps:
+#           - checkout: self
+#             fetchDepth: 0
+#             clean: true
+#             persistCredentials: true
+
+#           - bash: |
+#               set -euo pipefail
+#               echo "Build Reason  : $(Build.Reason)"
+#               echo "Source Branch : $(SOURCE_BRANCH)"
+#               echo "Target Branch : $(TARGET_BRANCH)"
+#               echo "Environment   : $(ENV_NAME)"
+#             displayName: 'Preflight'
+
+#           - bash: |
+#               set -euo pipefail
+#               ENV_KEY=$(echo "$(ENV_NAME)" | tr '[:lower:]' '[:upper:]' | sed 's/[^A-Z0-9_]/_/g')
+#               KEY_VAR="SF_JWT_KEY_B64_${ENV_KEY}"
+#               CID_VAR="SF_CLIENT_ID_${ENV_KEY}"
+#               USR_VAR="SF_USERNAME_${ENV_KEY}"
+#               URL_VAR="SF_INSTANCE_URL_${ENV_KEY}"
+#               printf '%s' "${!KEY_VAR}" | base64 -d > /tmp/server.key
+#               chmod 600 /tmp/server.key
+#               sf org login jwt --client-id "${!CID_VAR}" --jwt-key-file /tmp/server.key \
+#                 --username "${!USR_VAR}" --instance-url "${!URL_VAR}" \
+#                 --alias TARGET_ORG --set-default
+#             displayName: 'Authenticate Org'
+#             env:
+#               SF_JWT_KEY_B64_QA: $(SF_JWT_KEY_B64_QA)
+#               SF_CLIENT_ID_QA: $(SF_CLIENT_ID_QA)
+#               SF_USERNAME_QA: $(SF_USERNAME_QA)
+#               SF_INSTANCE_URL_QA: $(SF_INSTANCE_URL_QA)
+#               SF_JWT_KEY_B64_UAT: $(SF_JWT_KEY_B64_UAT)
+#               SF_CLIENT_ID_UAT: $(SF_CLIENT_ID_UAT)
+#               SF_USERNAME_UAT: $(SF_USERNAME_UAT)
+#               SF_INSTANCE_URL_UAT: $(SF_INSTANCE_URL_UAT)
+#               SF_JWT_KEY_B64_MAIN: $(SF_JWT_KEY_B64_MAIN)
+#               SF_CLIENT_ID_MAIN: $(SF_CLIENT_ID_MAIN)
+#               SF_USERNAME_MAIN: $(SF_USERNAME_MAIN)
+#               SF_INSTANCE_URL_MAIN: $(SF_INSTANCE_URL_MAIN)
+
+#           - bash: |
+#               set -euo pipefail
+#               npm install --no-save @salesforce/source-deploy-retrieve
+#               node .github/generate-delta.js
+#             name: delta
+#             displayName: 'Resolve Delta (SDR)'
+#             env:
+#               ENV_NAME: $(ENV_NAME)
+#               BUILD_REASON: $(Build.Reason)
+#               PR_TARGET_BRANCH: $(TARGET_BRANCH)
+#               PACKAGE_DIR: $(PACKAGE_DIR)
+
+#           - bash: |
+#               set -euo pipefail
+#               if [ "$(SF_USE_MANIFEST)" = "true" ]; then
+#                 sf project deploy validate --manifest manifest/package.xml --target-org TARGET_ORG $(SF_TEST_ARGS) --wait 120 --json | tee validation.json
+#               else
+#                 sf project deploy validate --source-dir force-app --target-org TARGET_ORG $(SF_TEST_ARGS) --wait 120 --json | tee validation.json
+#               fi
+#               VID=$(python3 -c "import json;print(json.load(open('validation.json'))['result']['id'])")
+#               echo "Validation ID: $VID"
+#               echo "##vso[task.setvariable variable=SF_VALIDATION_ID;isOutput=true]$VID"
+#             name: validation
+#             displayName: 'Validate Deployment'
+#             condition: and(succeeded(), eq(variables['SF_HAS_CHANGES'], 'true'))
+
+#           - publish: manifest
+#             artifact: sf-manifest
+#             condition: and(succeeded(), eq(variables['SF_HAS_CHANGES'], 'true'), eq(variables['SF_USE_MANIFEST'], 'true'))
+
+#       - job: Deploy
+#         displayName: 'Deploy'
+#         dependsOn: Validate
+#         condition: >
+#           and(
+#             succeeded(),
+#             ne(variables['Build.Reason'], 'PullRequest'),
+#             eq(dependencies.Validate.outputs['delta.SF_HAS_CHANGES'], 'true')
+#           )
+#         environment: '$(ENV_DISPLAY)'
+#         strategy:
+#           runOnce:
+#             deploy:
+#               steps:
+#                 - checkout: self
+#                   fetchDepth: 0
+#                   persistCredentials: true
+
+#                 - download: current
+#                   artifact: sf-manifest
+#                   continueOnError: true
+
+#                 - bash: |
+#                     set -euo pipefail
+#                     ENV_KEY=$(echo "$(ENV_NAME)" | tr '[:lower:]' '[:upper:]' | sed 's/[^A-Z0-9_]/_/g')
+#                     KEY_VAR="SF_JWT_KEY_B64_${ENV_KEY}"
+#                     CID_VAR="SF_CLIENT_ID_${ENV_KEY}"
+#                     USR_VAR="SF_USERNAME_${ENV_KEY}"
+#                     URL_VAR="SF_INSTANCE_URL_${ENV_KEY}"
+#                     printf '%s' "${!KEY_VAR}" | base64 -d > /tmp/server.key
+#                     chmod 600 /tmp/server.key
+#                     sf org login jwt --client-id "${!CID_VAR}" --jwt-key-file /tmp/server.key \
+#                       --username "${!USR_VAR}" --instance-url "${!URL_VAR}" \
+#                       --alias TARGET_ORG --set-default
+#                   displayName: 'Authenticate Org'
+#                   env:
+#                     SF_JWT_KEY_B64_QA: $(SF_JWT_KEY_B64_QA)
+#                     SF_CLIENT_ID_QA: $(SF_CLIENT_ID_QA)
+#                     SF_USERNAME_QA: $(SF_USERNAME_QA)
+#                     SF_INSTANCE_URL_QA: $(SF_INSTANCE_URL_QA)
+#                     SF_JWT_KEY_B64_UAT: $(SF_JWT_KEY_B64_UAT)
+#                     SF_CLIENT_ID_UAT: $(SF_CLIENT_ID_UAT)
+#                     SF_USERNAME_UAT: $(SF_USERNAME_UAT)
+#                     SF_INSTANCE_URL_UAT: $(SF_INSTANCE_URL_UAT)
+#                     SF_JWT_KEY_B64_MAIN: $(SF_JWT_KEY_B64_MAIN)
+#                     SF_CLIENT_ID_MAIN: $(SF_CLIENT_ID_MAIN)
+#                     SF_USERNAME_MAIN: $(SF_USERNAME_MAIN)
+#                     SF_INSTANCE_URL_MAIN: $(SF_INSTANCE_URL_MAIN)
+
+#                 - bash: |
+#                     set -euo pipefail
+#                     VID="$(dependencies.Validate.outputs['validation.SF_VALIDATION_ID'])"
+#                     USE_MANIFEST="$(dependencies.Validate.outputs['delta.SF_USE_MANIFEST'])"
+#                     MANIFEST_PATH="$(Pipeline.Workspace)/sf-manifest/package.xml"
+
+#                     if [ -n "$VID" ] && sf project deploy quick --job-id "$VID" --target-org TARGET_ORG --wait 60 2>/dev/null; then
+#                       echo "Quick-deployed validation $VID"
+#                     else
+#                       echo "Running direct deploy"
+#                       if [ "$USE_MANIFEST" = "true" ] && [ -f "$MANIFEST_PATH" ]; then
+#                         sf project deploy start --manifest "$MANIFEST_PATH" --target-org TARGET_ORG --wait 120
+#                       else
+#                         sf project deploy start --source-dir force-app --target-org TARGET_ORG --wait 120
+#                       fi
+#                     fi
+#                   displayName: 'Execute Deployment'
+
+#   - stage: BackMerge
+#     dependsOn: Pipeline
+#     condition: >
+#       and(
+#         succeeded(),
+#         eq(variables['Build.SourceBranch'], 'refs/heads/main')
+#       )
+#     jobs:
+#       - job: BackMergeMain
+#         steps:
+#           - checkout: self
+#             fetchDepth: 0
+#             persistCredentials: true
+#           - bash: |
+#               set -euo pipefail
+#               git config user.email "pipeline@azuredevops"
+#               git config user.name "Azure Pipelines"
+#               for target in uat qa; do
+#                 git checkout "$target"
+#                 git pull origin "$target"
+#                 if git merge --no-edit origin/main; then
+#                   git push origin "$target"
+#                   echo "Back-merged main -> $target"
+#                 else
+#                   echo "##vso[task.logissue type=error]Back-merge main -> $target has conflicts."
+#                   git merge --abort
+#                   exit 1
+#                 fi
+#               done
+#             displayName: 'Back-merge main into uat and qa'
