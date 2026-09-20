@@ -1,15 +1,17 @@
 // Author: Moksh Sharma / DevOps Architecture
-// Description: Resolves PR changed files and uses @salesforce/source-deploy-retrieve to generate manifest/package.xml and dynamic Apex test parameters.
+// Description: PR/push delta → SDR → manifest/package.xml + Apex test args.
+// Deletions are intentionally excluded (--diff-filter=d): developers remove metadata from the org manually.
 
-const { ComponentSet } = require('@salesforce/source-deploy-retrieve');
+const { ComponentSet, MetadataResolver } = require('@salesforce/source-deploy-retrieve');
 const { execSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 
-const packageDir = process.env.PACKAGE_DIR || 'force-app';
-const buildReason = process.env.BUILD_REASON || 'Manual';
-const targetBranch = (process.env.PR_TARGET_BRANCH || '').replace('refs/heads/', '').trim();
-let forceFull = process.env.FORCE_FULL === 'true';
+function requireEnv(name) {
+  const v = process.env[name];
+  if (!v || !v.trim()) throw new Error(`Missing required env var: ${name}`);
+  return v.trim();
+}
 
 function emit(name, value) {
   if (process.env.GITHUB_OUTPUT) {
@@ -18,144 +20,138 @@ function emit(name, value) {
   console.log(`[delta] ${name}=${value}`);
 }
 
-let prBody = process.env.PR_BODY || '';
-if (process.env.GITHUB_EVENT_PATH && fs.existsSync(process.env.GITHUB_EVENT_PATH)) {
-  try {
-    const event = JSON.parse(fs.readFileSync(process.env.GITHUB_EVENT_PATH, 'utf8'));
-    prBody = (event.pull_request && event.pull_request.body) || prBody;
-  } catch (e) {
-    console.error('[delta] Failed to parse GITHUB_EVENT_PATH:', e.message);
-  }
+function gitLines(cmd) {
+  const out = execSync(cmd, { encoding: 'utf8', maxBuffer: 50 * 1024 * 1024 }).trim();
+  return out ? out.split('\n').map(s => s.trim()).filter(Boolean) : [];
 }
 
-// Search for test annotations only in PR description (not commit messages)
-let searchString = prBody;
+const PACKAGE_DIR = requireEnv('PACKAGE_DIR');
+const SF_API_VERSION = requireEnv('SF_API_VERSION').replace(/^v/i, '');
+const BUILD_REASON = requireEnv('BUILD_REASON').toLowerCase();
+const FORCE_FULL = process.env.FORCE_FULL === 'true';
 
-let testLevel = 'RunLocalTests';
-let testArgs = '--test-level RunLocalTests';
-
-const apexTestMatch = searchString.match(/\|ApexTest:\[(.*?)\]/i);
-if (apexTestMatch && apexTestMatch[1].trim()) {
-  const tests = apexTestMatch[1]
-    .split(',')
-    .map(t => t.trim())
-    .filter(Boolean);
-  if (tests.length > 0) {
-    testLevel = 'RunSpecifiedTests';
-    testArgs = `--test-level RunSpecifiedTests --tests ${tests.join(' ')}`;
-  }
+if (!['pullrequest', 'push'].includes(BUILD_REASON)) {
+  throw new Error(`BUILD_REASON must be "PullRequest" or "Push", got "${BUILD_REASON}"`);
 }
 
-let diffCmd;
-if (buildReason === 'PullRequest') {
-  if (!targetBranch) {
-    throw new Error('[delta] PR_TARGET_BRANCH is required when BUILD_REASON is PullRequest');
+const TARGET_BRANCH = BUILD_REASON === 'pullrequest'
+  ? requireEnv('PR_TARGET_BRANCH').replace('refs/heads/', '')
+  : null;
+
+const BEFORE_SHA = BUILD_REASON === 'push' && !FORCE_FULL
+  ? (process.env.BEFORE_SHA || '').trim()
+  : null;
+
+function resolveTestArgs() {
+  if (!process.env.GITHUB_EVENT_PATH || !fs.existsSync(process.env.GITHUB_EVENT_PATH)) {
+    return { level: 'RunLocalTests', args: '--test-level RunLocalTests' };
   }
-  const targetRef = `refs/remotes/origin/${targetBranch}`;
-  try {
-    execSync(`git fetch --no-tags --prune origin "+refs/heads/${targetBranch}:${targetRef}"`, { stdio: 'ignore' });
-  } catch (e) {
-    console.error(`[delta] Failed to fetch origin/${targetBranch}:`, e.message);
-  }
-  diffCmd = `git diff --name-only --diff-filter=d "${targetRef}...HEAD" -- "${packageDir}"`;
-} else {
-  const beforeSha = process.env.BEFORE_SHA;
-  if (beforeSha && !/^0+$/.test(beforeSha)) {
-    diffCmd = `git diff --name-only --diff-filter=d "${beforeSha}..HEAD" -- "${packageDir}"`;
+
+  const event = JSON.parse(fs.readFileSync(process.env.GITHUB_EVENT_PATH, 'utf8'));
+  const body = (event.pull_request && event.pull_request.body) || '';
+
+  const match = body.match(/\|ApexTest:\[(.*?)\]/i);
+  const tests = match ? match[1].split(',').map(s => s.trim()).filter(Boolean) : [];
+  return tests.length
+    ? { level: 'RunSpecifiedTests', args: `--test-level RunSpecifiedTests --tests ${tests.join(' ')}` }
+    : { level: 'RunLocalTests', args: '--test-level RunLocalTests' };
+}
+
+function getChangedFiles() {
+  let range;
+  if (BUILD_REASON === 'pullrequest') {
+    const ref = `refs/remotes/origin/${TARGET_BRANCH}`;
+
+    execSync(
+      `git fetch --no-tags --prune origin "+refs/heads/${TARGET_BRANCH}:${ref}"`,
+      { stdio: 'inherit' }
+    );
+    range = `${ref}...HEAD`;   // three-dot: diff against merge-base
   } else {
-    diffCmd = `git diff --name-only --diff-filter=d HEAD~1 HEAD -- "${packageDir}"`;
+    if (!BEFORE_SHA || /^0+$/.test(BEFORE_SHA)) {  // new branch first commit // safe guard for 40 00000
+      range = `HEAD~1..HEAD`;
+    } else {
+      range = `${BEFORE_SHA}..HEAD`;
+    }
   }
+  return gitLines(`git diff --name-only --diff-filter=d ${range} -- "${PACKAGE_DIR}"`);
 }
 
-let changedFiles = [];
-try {
-  const output = execSync(diffCmd, { encoding: 'utf8' }).trim();
-  if (output) {
-    changedFiles = output.split('\n').map(f => f.trim()).filter(Boolean);
-  }
-} catch (e) {
-  throw new Error(`[delta] Git diff execution failed (${diffCmd}): ${e.message}`);
+function getAllFiles() {
+  return gitLines(`git ls-files -- "${PACKAGE_DIR}"`);
 }
 
-changedFiles = changedFiles.filter(f => fs.existsSync(f));
+function toComponentSet(files) {
+  const resolver = new MetadataResolver();
+  const components = [];
+  const skipped = [];
 
-async function run() {
-  emit('SF_TEST_LEVEL', testLevel);
-  emit('SF_TEST_ARGS', testArgs);
-
-  if (forceFull) {
-    emit('SF_DEPLOY_MODE', 'full');
-    emit('SF_HAS_CHANGES', 'true');
-    emit('SF_USE_MANIFEST', 'false');
-    return;
-  }
-
-  if (changedFiles.length === 0) {
-    emit('SF_DEPLOY_MODE', 'delta');
-    emit('SF_HAS_CHANGES', 'false');
-    emit('SF_USE_MANIFEST', 'false');
-    return;
-  }
-
-  console.log(`[delta] ${changedFiles.length} changed files detected`);
-
-  const componentSet = ComponentSet.fromSource(changedFiles);
-
-  if (componentSet.size === 0) {
-    console.log('[delta] No metadata components detected in changed files');
-    emit('SF_DEPLOY_MODE', 'delta');
-    emit('SF_HAS_CHANGES', 'false');
-    emit('SF_USE_MANIFEST', 'false');
-    return;
-  }
-
-  let apiVersion = (process.env.SF_API_VERSION || '').trim().replace(/^v/i, '');
-  if (!apiVersion && fs.existsSync('sfdx-project.json')) {
+  for (const f of files) {
+    if (!fs.existsSync(f)) { skipped.push(`${f} (not on disk)`); continue; }
     try {
-      const sfdxProject = JSON.parse(fs.readFileSync('sfdx-project.json', 'utf8'));
-      if (sfdxProject.sourceApiVersion) {
-        apiVersion = String(sfdxProject.sourceApiVersion).trim().replace(/^v/i, '');
-      }
-    } catch (e) {
-      console.error('[delta] Could not read sfdx-project.json:', e.message);
+      components.push(...resolver.getComponentsFromPath(f));
+    } catch {
+      skipped.push(`${f} (not metadata)`);
     }
   }
 
-  if (apiVersion) {
-    componentSet.apiVersion = apiVersion;
-    console.log(`[delta] Salesforce API Version: ${apiVersion}`);
-    emit('SF_API_VERSION', apiVersion);
+  if (skipped.length) {
+    console.log(`[delta] Skipped ${skipped.length} file(s):`);
+    skipped.forEach(s => console.log(`  - ${s}`));
   }
+  return new ComponentSet(components);
+}
+
+async function main() {
+  const { level, args } = resolveTestArgs();
+  emit('SF_TEST_LEVEL', level);
+  emit('SF_TEST_ARGS', args);
+
+  const files = FORCE_FULL ? getAllFiles() : getChangedFiles();
+  console.log(`[delta] Source files: ${files.length}${FORCE_FULL ? ' (FORCE_FULL)' : ''}`);
+  files.forEach(f => console.log(`  - ${f}`));
+
+  if (files.length === 0) {
+    console.log('[delta] No source files detected.');
+    emit('SF_DEPLOY_MODE', 'none');
+    emit('SF_HAS_CHANGES', 'false');
+    return;
+  }
+
+  const componentSet = toComponentSet(files);
+
+  if (componentSet.size === 0) {
+    console.log('[delta] No metadata components resolved.');
+    emit('SF_DEPLOY_MODE', 'none');
+    emit('SF_HAS_CHANGES', 'false');
+    return;
+  }
+
+  componentSet.apiVersion = SF_API_VERSION;
 
   const manifestDir = path.join(process.cwd(), 'manifest');
   fs.mkdirSync(manifestDir, { recursive: true });
   const manifestPath = path.join(manifestDir, 'package.xml');
 
-  const xmlContent = await componentSet.getPackageXml();
-  fs.writeFileSync(manifestPath, xmlContent);
+  const xml = await componentSet.getPackageXml();
+  fs.writeFileSync(manifestPath, xml);
 
-  console.log('\n--- BEGIN MANIFEST: manifest/package.xml ---');
-  console.log(xmlContent);
-  console.log('--- END MANIFEST: manifest/package.xml ---\n');
+  console.log('\n--- manifest/package.xml ---');
+  console.log(xml);
+  console.log('--- end ---\n');
 
   if (process.env.GITHUB_STEP_SUMMARY) {
-    try {
-      fs.appendFileSync(
-        process.env.GITHUB_STEP_SUMMARY,
-        `### Manifest Content (package.xml)\n\`\`\`xml\n${xmlContent}\n\`\`\`\n`
-      );
-    } catch (e) {
-      console.error('[delta] Failed to write step summary:', e.message);
-    }
+    fs.appendFileSync(
+      process.env.GITHUB_STEP_SUMMARY,
+      `### Manifest (package.xml)\n\`\`\`xml\n${xml}\n\`\`\`\n`
+    );
   }
 
-  emit('SF_DEPLOY_MODE', 'delta');
+  emit('SF_DEPLOY_MODE', FORCE_FULL ? 'full' : 'delta');
   emit('SF_HAS_CHANGES', 'true');
-  emit('SF_USE_MANIFEST', 'true');
-  emit('SF_MANIFEST_PATH', manifestPath);
 }
 
-run().catch(err => {
+main().catch(err => {
   console.error('[delta] Fatal:', err.message);
   process.exit(1);
 });
