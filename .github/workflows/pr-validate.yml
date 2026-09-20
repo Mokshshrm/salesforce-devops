@@ -5,100 +5,96 @@ name: Validate Pull Request
 
 on:
   pull_request:
-    branches: [qa, uat, main]
-    types: [opened, synchronize, reopened, edited]
+    branches: [ qa, uat, main ]
+    types: [ opened, synchronize, reopened, edited ]
 
 permissions:
   contents: read
   pull-requests: read
 
-env:
-  NODE_VERSION: ${{ vars.NODE_VERSION || '22' }}
-  SF_CLI_VERSION: ${{ vars.SF_CLI_VERSION || 'latest' }}
-  SDR_VERSION: ${{ vars.SDR_VERSION || 'latest' }}
+concurrency:
+  group: validate-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 jobs:
   validate:
     name: Validate Delta (${{ github.base_ref }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     environment: ms${{ github.base_ref }}
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
+      -
+        name: Checkout Code
+        uses: actions/checkout@v4.2.2
         with:
           fetch-depth: 0
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      -
+        name: Setup Node.js
+        uses: actions/setup-node@v4.1.0
         with:
-          node-version: ${{ env.NODE_VERSION }}
+          node-version: ${{ vars.NODE_VERSION }}
 
-      - name: Install Salesforce CLI & SDR
+      -
+        name: Install Salesforce CLI & SDR
         run: |
-          CLI_PKG="${SF_CLI_VERSION:+@salesforce/cli@$SF_CLI_VERSION}"
-          CLI_PKG="${CLI_PKG:-@salesforce/cli@latest}"
-          SDR_PKG="${SDR_VERSION:+@salesforce/source-deploy-retrieve@$SDR_VERSION}"
-          SDR_PKG="${SDR_PKG:-@salesforce/source-deploy-retrieve@latest}"
-          npm install -g "$CLI_PKG"
-          npm install --no-save "$SDR_PKG"
+          npm install -g "@salesforce/cli@${{ vars.SF_CLI_VERSION }}"
+          npm install --no-save "@salesforce/source-deploy-retrieve@${{ vars.SDR_VERSION }}"
 
-      - name: Authenticate Target Org
+      -
+        name: Authenticate Target Org
+        env:
+          SERVER_KEY: ${{ secrets.SERVER_KEY }}
+          CLIENT_ID: ${{ secrets.CLIENT_ID }}
+          USERNAME: ${{ vars.USERNAME }}
+          INSTANCE_URL: ${{ vars.INSTANCE_URL }}
         run: |
-          if [ -z "$SF_JWT_KEY" ]; then
-            echo "::error::Missing JWT Key in secrets. Checked secrets.SF_JWT_KEY, secrets.SERVER_KEY, secrets.CLIENT_SECRET for environment 'ms${{ github.base_ref }}'."
-            exit 1
-          fi
-          if [ -z "$SF_CLIENT_ID" ]; then
-            echo "::error::Missing CLIENT_ID in environment 'ms${{ github.base_ref }}'."
-            exit 1
-          fi
-          if [ -z "$SF_USERNAME" ]; then
-            echo "::error::Missing USERNAME in variables/secrets for environment 'ms${{ github.base_ref }}'."
-            exit 1
-          fi
-          if [ -z "$SF_INSTANCE_URL" ]; then
-            echo "::error::Missing INSTANCE_URL in variables/secrets for environment 'ms${{ github.base_ref }}'."
-            exit 1
-          fi
+          set -e
+          [ -n "$SERVER_KEY" ]   || { echo "::error::Missing SERVER_KEY"; exit 1; }
+          [ -n "$CLIENT_ID" ]    || { echo "::error::Missing CLIENT_ID"; exit 1; }
+          [ -n "$USERNAME" ]     || { echo "::error::Missing USERNAME"; exit 1; }
+          [ -n "$INSTANCE_URL" ] || { echo "::error::Missing INSTANCE_URL"; exit 1; }
 
-          if echo "$SF_JWT_KEY" | grep -q "BEGIN"; then
-            printf '%s\n' "$SF_JWT_KEY" > /tmp/server.key
+          if echo "$SERVER_KEY" | grep -q "BEGIN"; then
+            printf '%s\n' "$SERVER_KEY" > /tmp/server.key
           else
-            printf '%s' "$SF_JWT_KEY" | tr -d '\r\n ' | base64 -d > /tmp/server.key
+            printf '%s' "$SERVER_KEY" | tr -d '\r\n ' | base64 -d > /tmp/server.key
           fi
           chmod 600 /tmp/server.key
 
-          sf org login jwt --client-id "$SF_CLIENT_ID" --jwt-key-file /tmp/server.key \
-            --username "$SF_USERNAME" --instance-url "$SF_INSTANCE_URL" \
-            --alias TARGET_ORG --set-default
-        env:
-          SF_JWT_KEY: ${{ secrets.SF_JWT_KEY || secrets.SERVER_KEY || secrets.CLIENT_SECRET }}
-          SF_CLIENT_ID: ${{ secrets.CLIENT_ID || vars.CLIENT_ID }}
-          SF_USERNAME: ${{ vars.USERNAME || secrets.USERNAME }}
-          SF_INSTANCE_URL: ${{ vars.INSTANCE_URL || secrets.INSTANCE_URL }}
+          sf org login jwt \
+            --client-id "$CLIENT_ID" \
+            --jwt-key-file /tmp/server.key \
+            --username "$USERNAME" \
+            --instance-url "$INSTANCE_URL" \
+            --alias TARGET_ORG \
+            --set-default
 
       - name: Calculate Delta Changes
         id: delta
-        run: node .github/generate-delta.js
         env:
           PACKAGE_DIR: force-app
           BUILD_REASON: PullRequest
           PR_TARGET_BRANCH: ${{ github.base_ref }}
           SF_API_VERSION: ${{ vars.SF_API_VERSION }}
+          FORCE_FULL: ${{ vars.FORCE_FULL || 'false' }}
+        run: node .github/generate-delta.js
 
-      - name: Validate Deployment
+      -
+        name: Validate Deployment
         if: steps.delta.outputs.SF_HAS_CHANGES == 'true'
         run: |
-          TEST_ARGS="${{ steps.delta.outputs.SF_TEST_ARGS }}"
-          if [ "${{ steps.delta.outputs.SF_USE_MANIFEST }}" = "true" ]; then
-            sf project deploy validate --manifest manifest/package.xml --target-org TARGET_ORG $TEST_ARGS --wait 120
-          else
-            sf project deploy validate --source-dir force-app --target-org TARGET_ORG $TEST_ARGS --wait 120
-          fi
+          sf project deploy validate \
+            --manifest manifest/package.xml \
+            --target-org TARGET_ORG \
+            ${{ steps.delta.outputs.SF_TEST_ARGS }} \
+            --wait 75
 
-      - name: Upload Delta Manifest
-        if: steps.delta.outputs.SF_HAS_CHANGES == 'true' && steps.delta.outputs.SF_USE_MANIFEST == 'true'
+      -
+        name: Upload Delta Manifest
+        if: steps.delta.outputs.SF_HAS_CHANGES == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: sf-manifest-${{ github.base_ref }}
+          name: sf-manifest-${{ github.base_ref }}-${{ github.run_id }}
           path: manifest/package.xml
+          if-no-files-found: error
+          retention-days: 14
