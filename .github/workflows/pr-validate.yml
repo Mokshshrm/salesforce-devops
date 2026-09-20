@@ -43,29 +43,29 @@ jobs:
       -
         name: Authenticate Target Org
         env:
-          SF_JWT_KEY: ${{ secrets.SF_JWT_KEY || secrets.SERVER_KEY }}
-          SF_CLIENT_ID: ${{ secrets.SF_CLIENT_ID }}
-          SF_USERNAME: ${{ vars.SF_USERNAME }}
-          SF_INSTANCE_URL: ${{ vars.SF_INSTANCE_URL }}
+          SERVER_KEY: ${{ secrets.SERVER_KEY }}
+          CLIENT_ID: ${{ secrets.CLIENT_ID }}
+          USERNAME: ${{ vars.USERNAME }}
+          INSTANCE_URL: ${{ vars.INSTANCE_URL }}
         run: |
           set -e
-          [ -n "$SF_JWT_KEY" ]      || { echo "::error::Missing SF_JWT_KEY"; exit 1; }
-          [ -n "$SF_CLIENT_ID" ]    || { echo "::error::Missing SF_CLIENT_ID"; exit 1; }
-          [ -n "$SF_USERNAME" ]     || { echo "::error::Missing SF_USERNAME"; exit 1; }
-          [ -n "$SF_INSTANCE_URL" ] || { echo "::error::Missing SF_INSTANCE_URL"; exit 1; }
+          [ -n "$SERVER_KEY" ]   || { echo "::error::Missing SERVER_KEY"; exit 1; }
+          [ -n "$CLIENT_ID" ]    || { echo "::error::Missing CLIENT_ID"; exit 1; }
+          [ -n "$USERNAME" ]     || { echo "::error::Missing USERNAME"; exit 1; }
+          [ -n "$INSTANCE_URL" ] || { echo "::error::Missing INSTANCE_URL"; exit 1; }
 
-          if echo "$SF_JWT_KEY" | grep -q "BEGIN"; then
-            printf '%s\n' "$SF_JWT_KEY" > /tmp/server.key
+          if echo "$SERVER_KEY" | grep -q "BEGIN"; then
+            printf '%s\n' "$SERVER_KEY" > /tmp/server.key
           else
-            printf '%s' "$SF_JWT_KEY" | tr -d '\r\n ' | base64 -d > /tmp/server.key
+            printf '%s' "$SERVER_KEY" | tr -d '\r\n ' | base64 -d > /tmp/server.key
           fi
           chmod 600 /tmp/server.key
 
           sf org login jwt \
-            --client-id "$SF_CLIENT_ID" \
+            --client-id "$CLIENT_ID" \
             --jwt-key-file /tmp/server.key \
-            --username "$SF_USERNAME" \
-            --instance-url "$SF_INSTANCE_URL" \
+            --username "$USERNAME" \
+            --instance-url "$INSTANCE_URL" \
             --alias TARGET_ORG \
             --set-default
 
