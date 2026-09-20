@@ -99,7 +99,7 @@ function toComponentSet(files) {
     console.log(`[delta] Skipped ${skipped.length} file(s):`);
     skipped.forEach(s => console.log(`  - ${s}`));
   }
-  return ComponentSet.fromComponents(components);
+  return new ComponentSet(components);
 }
 
 async function main() {
@@ -110,6 +110,13 @@ async function main() {
   const files = FORCE_FULL ? getAllFiles() : getChangedFiles();
   console.log(`[delta] Source files: ${files.length}${FORCE_FULL ? ' (FORCE_FULL)' : ''}`);
   files.forEach(f => console.log(`  - ${f}`));
+
+  if (files.length === 0) {
+    console.log('[delta] No source files detected.');
+    emit('SF_DEPLOY_MODE', 'none');
+    emit('SF_HAS_CHANGES', 'false');
+    return;
+  }
 
   const componentSet = toComponentSet(files);
 
