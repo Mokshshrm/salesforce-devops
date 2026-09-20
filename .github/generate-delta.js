@@ -8,7 +8,7 @@ const path = require('path');
 
 const packageDir = process.env.PACKAGE_DIR || 'force-app';
 const buildReason = process.env.BUILD_REASON || 'Manual';
-const targetBranch = (process.env.PR_TARGET_BRANCH || 'main').replace('refs/heads/', '');
+const targetBranch = (process.env.PR_TARGET_BRANCH || '').replace('refs/heads/', '').trim();
 let forceFull = process.env.FORCE_FULL === 'true';
 
 function emit(name, value) {
@@ -28,16 +28,8 @@ if (process.env.GITHUB_EVENT_PATH && fs.existsSync(process.env.GITHUB_EVENT_PATH
   }
 }
 
+// Search for test annotations only in PR description (not commit messages)
 let searchString = prBody;
-try {
-  const commitMsg = execSync('git log -1 --pretty=%B', { encoding: 'utf8' });
-  searchString += '\n' + commitMsg;
-  if (/NO[_-]?DELTA/i.test(commitMsg)) {
-    forceFull = true;
-  }
-} catch (e) {
-  console.error('[delta] Failed to read commit message:', e.message);
-}
 
 let testLevel = 'RunLocalTests';
 let testArgs = '--test-level RunLocalTests';
@@ -56,6 +48,9 @@ if (apexTestMatch && apexTestMatch[1].trim()) {
 
 let diffCmd;
 if (buildReason === 'PullRequest') {
+  if (!targetBranch) {
+    throw new Error('[delta] PR_TARGET_BRANCH is required when BUILD_REASON is PullRequest');
+  }
   const targetRef = `refs/remotes/origin/${targetBranch}`;
   try {
     execSync(`git fetch --no-tags --prune origin "+refs/heads/${targetBranch}:${targetRef}"`, { stdio: 'ignore' });
@@ -79,17 +74,7 @@ try {
     changedFiles = output.split('\n').map(f => f.trim()).filter(Boolean);
   }
 } catch (e) {
-  console.error('[delta] Git diff failed:', e.message);
-  if (diffCmd.includes('..HEAD')) {
-    try {
-      const fallbackOutput = execSync(`git diff --name-only --diff-filter=d HEAD~1 HEAD -- "${packageDir}"`, { encoding: 'utf8' }).trim();
-      if (fallbackOutput) {
-        changedFiles = fallbackOutput.split('\n').map(f => f.trim()).filter(Boolean);
-      }
-    } catch (err) {
-      console.error('[delta] Git diff fallback failed:', err.message);
-    }
-  }
+  throw new Error(`[delta] Git diff execution failed (${diffCmd}): ${e.message}`);
 }
 
 changedFiles = changedFiles.filter(f => fs.existsSync(f));
