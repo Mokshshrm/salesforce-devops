@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ValidationRule xmlns="http://soap.sforce.com/2006/04/metadata">
+    <fullName>Title_Required</fullName>
+    <active>true</active>
+    <errorConditionFormula>ISBLANK(Job_Title__c)</errorConditionFormula>
+    <errorMessage>Title is Required</errorMessage>
+</ValidationRule>
