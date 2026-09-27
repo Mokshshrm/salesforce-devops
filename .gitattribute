@@ -1,0 +1,2 @@
+# Disable auto-merging for all files across the whole repository
+* merge=binary
