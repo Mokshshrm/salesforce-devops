@@ -1,0 +1,5 @@
+# Disable auto-merging for all files across the whole repository
+* merge=binary
+
+# OPTIONAL: Keep specific text files auto-merging if necessary (e.g., documentation)
+# *.md text
